@@ -1,0 +1,11 @@
+name: kubernetes deplomet
+on: [push]
+jobs:
+  build-frontend:
+    runs-on: node:latest
+    steps:
+        - run: |
+            cd frondend &&
+            npm install &&
+            npm run build &&
+            ls-la
