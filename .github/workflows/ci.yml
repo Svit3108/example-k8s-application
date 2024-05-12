@@ -18,7 +18,7 @@ jobs:
           path: frontend/dist/frontend/browser
   upload-s3:
     runs-on: ubuntu-latest
-    # container: amazon/aws-cli:latest
+    # container: amazon/aws-cli:lates
     needs: build-frontend
     steps:
       - uses: actions/download-artifact@master
