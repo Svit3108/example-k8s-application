@@ -1,72 +1,86 @@
-name: kubernetes deployment
-
-on: 
-  push:
-    branches:
-      - '*'
-
+name: ci-cd pipeline
+on: [push]
+env:
+  AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+  PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
 jobs:
-  build-frontend:
-    runs-on: ubuntu-latest  
+  build:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Use Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
-      - run: |
-          cd frontend &&
-          npm install &&
-          npm run build &&
+        with:
+          node-version: 'latest'
+      - name: Build
+        run: |
+          cd frontend
+          npm install
+          npm run build
           ls -la
-      - uses: actions/upload-artifact@master
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: frontend-artifact
+          name: frontend
           path: frontend/dist/frontend/browser
 
-  deploy-frontend:
-    needs: [build-frontend]
+  upload_to_s3:
+    needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v2
+      - uses: actions/checkout@v4
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: frontend-artifact
+          name: frontend
           path: frontend/dist/frontend/browser
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+            aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+            aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+            aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
       - name: Upload to S3
-        uses: jakejarvis/s3-sync-action@master
-        with:
-          args: --acl public-read --follow-symlinks --delete
-        env:
-          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: 'eu-central-1'
-          SOURCE_DIR: 'frontend/dist/frontend/browser'
+        run: |
+          aws --version
+          cd frontend/dist/frontend/browser
+          ls -la
+          aws s3 cp . s3://$AWS_S3_BUCKET/ --recursive
 
-  build-image:
-    needs: [build-frontend]
+  ansible-to-ec2:
+    needs: upload_to_s3
     runs-on: ubuntu-latest
     steps:
-      - name: Login_to DockerHub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Build and push
-        uses: docker/build-push-action@v2
-        with:
-          context: backend/
-          push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/example-k8s-backend:${{ github.sha }}
-
-  deploy-backend:
-    needs: [build-image]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Install Ansible
-        run: sudo apt-get update && sudo apt-get install ansible -y
-      - name: Clone Ansible repository
-        run: git clone https://github.com/ansible/ansible.git
+      - uses: actions/checkout@v4
+      - name: Add host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.HOST_IP }} >> ~/.ssh/known_hosts
+      - name: Set up Ansible
+        run: |
+          echo "$PRIVATE_KEY" > ./temp_key.pem
+          chmod 600 ./temp_key.pem
+          export ANSIBLE_HOST_KEY_CHECKING=False
       - name: Run Ansible playbook
         run: |
-          cd ansible
-          ansible-playbook -i hosts.ini deploy_backend.yml --private-key=$PRIVATE_KEY_PATH
+          ansible --version
+          ansible-playbook -i hosts.ini deploy-backend.yml --private-key=./temp_key.pem
+          rm -f ./temp_key.pem
+
+  start-backend:
+    needs: ansible-to-ec2
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'latest'
+      - name: Start backend
+        run: |
+          cd backend
+          npm install
+          npm start &
+          sleep 20
+          kill $! || true
